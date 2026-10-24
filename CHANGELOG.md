@@ -1,6 +1,9 @@
 # Open Vanilla changelog
 (build_repack.py turns the newest sections into the launcher's patch notes: "## Section" headers, "- item" lines.)
 
+## New in 1.54.0
+- Launcher sign-in: Continue with Google and the Hero Key the launcher keeps, no Discord sign-in (realm patch 0042).
+
 ## New in 1.53.1
 - Duels: no more "attempt to index global DuelsBars (a nil value)" (Bars.lua:184): every saved table (DuelsBars, DuelsLoadouts, DuelsIntro, DuelsPitPrefs) is made again before use, when the client set it to nil after….
 
