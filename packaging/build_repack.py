@@ -107,7 +107,7 @@ def engine_licenses(repo, dst):
 # and the dedicated server. A missing one used to mean "Hosting isn't available in this build".
 HIDDEN_IMPORTS = ("play_local", "workshop", "nowplaying", "layout", "updater", "fetch", "live_content", "spp", "home_logic", "game_clients",
                   "server_host", "server_control", "authcheck", "asset_server", "account", "wow_import", "ed25519",
-                  "launcher_art", "ai_setup", "aiohttp", "pymysql")
+                  "launcher_art", "ai_setup", "aiohttp", "pymysql", "tls", "certifi")
 COLLECT_SUBMODULES = ("p2p", "studio")
 LAUNCHER_NAME = "OpenVanilla"      # OpenVanilla.exe
 OLD_LAUNCHER_EXE = "OpenWoW.exe"        # bridge twin: launchers before the rename only update this name

@@ -45,6 +45,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
+import tls           # HTTPS trusts Mozilla's roots as well as Windows' (launcher/tls.py); before anything connects
+tls.install()
 import account
 import launcher_art as art
 import wow_import  # finds and checks the player's own 1.12.1 install (archives, WoW.exe build)

@@ -248,6 +248,13 @@ fi
 mkdir -p "$HERALD_PUBLIC"
 cat > "$CP/Caddyfile" <<'CADDY'
 # Written by openvanilla_realm_up.sh: upstream wenilla-realm's Caddyfile + Open Vanilla's /community/ feed.
+{
+	# RSA certificates: Let's Encrypt chains them to ISRG Root X1, which every trust store has. Its
+	# default ECDSA chain runs through ISRG Root X2's cross-sign by X1, and the launcher (Python, the
+	# roots Windows has installed) read that as "certificate has expired" (2026-10-24).
+	# hetzner/openvanilla_tls_rsa.sh moves a running realm over.
+	key_type rsa2048
+}
 {$REALM_DOMAIN:localhost} {
 	encode zstd gzip
 	# Open Vanilla service worker: allowed to control the whole site, not just /ow/.
