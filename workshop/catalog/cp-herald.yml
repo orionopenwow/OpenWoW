@@ -13,10 +13,10 @@ homepage: https://openvanilla.app/
 version: 1.0.0
 added: '2026-10-17'
 files:
-- name: cp-herald-2cae83bbfe9b.zip
-  url: community/workshop/files/cp-herald-2cae83bbfe9b.zip
-  sha256: 2cae83bbfe9bdff132515a88407bad1316363d2dec8e9f434c397a8710118b50
-  size: 8898
+- name: cp-herald-b97fbf6bb6e3.zip
+  url: community/workshop/files/cp-herald-b97fbf6bb6e3.zip
+  sha256: b97fbf6bb6e3126f0854de1640e4398214ff5fbc63398346039b1676e6510439
+  size: 8905
   folders:
   - Herald
 screenshots:
@@ -32,7 +32,7 @@ upstream:
   deps: none
 scan:
   compat: unknown
-  checked: '2026-10-23'
+  checked: '2026-10-24'
   findings: []
   errors:
   - lua5.1 is not installed

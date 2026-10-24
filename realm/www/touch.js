@@ -45,7 +45,7 @@
 // Shown on the ?touchdebug=1 line, so a phone can tell at a glance which build it is running.
 import { gamePointerEvent } from './input.js';
 
-export const TOUCH_BUILD = '2026-10-21 press in, lift out';
+export const TOUCH_BUILD = '2026-10-24 game-tick taps';
 
 const LS = (k, v) => {
   try {
@@ -564,13 +564,36 @@ const sloppyTap = (t, x, y) => Math.hypot(x - t.x0, y - t.y0) <= SLOPPY_PX && pe
 // each step waits for a frame the game has drawn (a timer alone can fall inside one slow frame).
 const afterFrame = () => new Promise((ok) => requestAnimationFrame(() => setTimeout(ok, 0)));
 const wait = (ms) => new Promise((ok) => setTimeout(ok, ms));
-async function click(x, y, button = 0) {
-  const bits = button === 2 ? 2 : 1;
-  moveTo(x, y);
-  await wait(30); await afterFrame();
-  mouse('pointerdown', x, y, button, bits);
-  await wait(60); await afterFrame();
-  mouse('pointerup', x, y, button, 0);
+// A frame the browser drew is not a frame the game ran: on a slow phone the game's update can
+// lag the page's animation frame, so a move and the press after it landed in ONE game update,
+// the press read the hover from before the move, and the button lit up but never clicked
+// ("highlights, no action", Android Chrome on the character screens, 2026-10-24). A Lua call
+// through the bridge is answered from inside a game update, so each answer proves the game has
+// run once more since the call: two of them = the move is in and the hover it made is computed.
+// Falls back to the frame wait when there is no VM (loading screens) or the bridge is slow.
+async function gameTicks(n = 2) {
+  const w = window.wenilla;
+  for (let i = 0; i < n; i++) {
+    // whichever comes first: the game's answer, or two page frames (no VM, or a bridge that is busy)
+    const frames = afterFrame().then(afterFrame);
+    await (w?.lua ? Promise.race([w.lua('return 1', 1500).catch(() => frames), frames]) : frames);
+  }
+}
+const settle = () => gameTicks(2);
+// One synthetic mouse sequence at a time: a second tap that lands while the first one's press and
+// release are still going (two quick taps on Next, a slow phone) waits its turn instead of
+// interleaving its move and press with the first's, which the game read as presses on nothing.
+let mouseChain = Promise.resolve();
+const inTurn = (fn) => (mouseChain = mouseChain.then(fn, fn));
+function click(x, y, button = 0) {
+  return inTurn(async () => {
+    const bits = button === 2 ? 2 : 1;
+    moveTo(x, y);
+    await settle();                                  // the game has the cursor there and has hovered it
+    mouse('pointerdown', x, y, button, bits);
+    await settle();
+    mouse('pointerup', x, y, button, 0);
+  });
 }
 
 // -- The controller -----------------------------------------------------------------------------
@@ -1221,7 +1244,8 @@ return table.concat(t, "\\n")`;
       `factor ${fx.toFixed(2)},${fy.toFixed(2)} buttons ${targets.length} taps ${status.taps} mode ${TAPMODE}${'onpointerrawupdate' in window ? ' raw' : ''}\n` +
       `${extra || glueLast}\ngame took:${tapTrace.last || ' -'}  errors ${tapTrace.errors}${tapTrace.error ? ': ' + tapTrace.error : ''}`;
   }
-  function glueTap(x, y) {
+  async function glueTap(x, y, rescan) {
+    if (rescan) await scanSoon();                      // the page changed size: find the buttons where they are now
     const t = snap(x, y);
     const px = t ? t.x + t.w / 2 : x, py = t ? t.y + t.h / 2 : y;
     click(px, py, 0);
@@ -1267,7 +1291,9 @@ return table.concat(t, "\\n")`;
   }
   let gl = null, aimTimer = 0;
   glue.addEventListener('pointerdown', (e) => {
-    if (gl && gl.id !== e.pointerId) return;          // one finger at a time
+    // one finger at a time; a finger whose lift never arrived (the browser lost it) stops counting
+    // after a few seconds instead of blocking every tap after it
+    if (gl && gl.id !== e.pointerId && performance.now() - gl.t0 < 4000) return;
     e.preventDefault();
     try { glue.setPointerCapture(e.pointerId); } catch { /* fine */ }
     gl = { id: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, t0: performance.now(), mode: 'tap', w: innerWidth, h: innerHeight };
@@ -1280,7 +1306,8 @@ return table.concat(t, "\\n")`;
       return;
     }
     scanSoon();
-    moveTo(e.clientX, e.clientY);                      // hover first: buttons light up, tooltips show
+    const hx = e.clientX, hy = e.clientY;
+    inTurn(() => moveTo(hx, hy));                      // hover first: buttons light up, tooltips show
     clearTimeout(aimTimer);
     aimTimer = setTimeout(() => {                      // held still: aim with the loupe
       if (!gl || gl.mode !== 'tap') return;
@@ -1320,10 +1347,25 @@ return table.concat(t, "\\n")`;
       else mouse('pointerup', g.x, g.y, 0, 0);
       return;
     }
-    // a rotation or the switch to full screen mid-tap moves everything: that tap would land elsewhere
-    if (e.type !== 'pointerup' || g.w !== innerWidth || g.h !== innerHeight) return;
+    // A tap is dropped only when it can't mean what the finger touched: a turn to the other
+    // orientation, or the page changing size by a lot (going full screen). Android Chrome changes
+    // innerHeight by a few px when its address bar or the visual viewport moves, and a
+    // pointercancel can end a plain tap there: both used to drop the tap silently, so the button
+    // lit up under the finger and never clicked ("highlights, no action", 2026-10-24).
+    const quickCancel = e.type === 'pointercancel' && g.mode === 'tap' && performance.now() - g.t0 < LONG_MS
+      && Math.hypot(g.x - g.x0, g.y - g.y0) <= TAP_SLOP;
+    const turned = (g.w > g.h) !== (innerWidth > innerHeight);
+    const resized = Math.abs(innerWidth - g.w) > g.w * 0.2 || Math.abs(innerHeight - g.h) > g.h * 0.2;
+    if ((e.type !== 'pointerup' && !quickCancel) || turned || resized) {
+      status.dropped = (status.dropped || 0) + 1;
+      glueLast = `dropped: ${e.type !== 'pointerup' && !quickCancel ? e.type : turned ? 'turned' : `resized ${g.w}x${g.h}->${innerWidth}x${innerHeight}`}`;
+      debugLine();
+      return;
+    }
+    // a small resize (address bar): the same spot of the page, scaled to its new size
+    const kx = innerWidth / g.w, ky = innerHeight / g.h;
     // a tap goes where the finger landed (not where it rolled to); an aimed one where the loupe aimed
-    if (g.mode === 'aim') glueTap(g.x, g.y); else glueTap(g.x0, g.y0);
+    if (g.mode === 'aim') glueTap(g.x * kx, g.y * ky); else glueTap(g.x0 * kx, g.y0 * ky, kx !== 1 || ky !== 1);
   };
   glue.addEventListener('pointerup', glueEnd);
   glue.addEventListener('pointercancel', glueEnd);
@@ -1362,11 +1404,12 @@ return table.concat(t, "\\n")`;
     }
     const t = touches.get(e.pointerId);
     const id = e.pointerId;
-    moveTo(e.clientX, e.clientY);
+    const moved = inTurn(() => moveTo(e.clientX, e.clientY));   // after any tap still being played out
     // the second touch of a double-tap (a right-click on lift) is never pressed in
     t.maybeDbl = performance.now() - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 36;
     // is it a game window under the finger (drag it) or the world (turn the camera)?
-    t.focusP = lua('local f = GetMouseFocus() return f and f.GetName and (f:GetName() or "?") or ""').then((r) => {
+    // asked once the cursor is there (a tap still playing out goes first), so the answer is about this spot
+    t.focusP = moved.then(() => lua('local f = GetMouseFocus() return f and f.GetName and (f:GetName() or "?") or ""')).then((r) => {
       t.focus = r?.[0] ?? '';
       pressIn(t, id);
     });
@@ -1378,20 +1421,26 @@ return table.concat(t, "\\n")`;
   // is under the finger, and never for the world, a moving finger or the second tap of a double-tap.
   const onWindow = (t) => !!t.focus && t.focus !== 'WorldFrame';
   function pressIn(t, id) {
-    if (!onWindow(t) || t.moved || t.lifted || t.maybeDbl || pinch || touches.get(id) !== t) return;
-    afterFrame().then(() => {                          // the hover the move made is a frame old
+    // a quick second tap on a window is another click (paging, +/-, Next): only in the world is it a right-click
+    if (!onWindow(t) || t.moved || t.lifted || pinch || touches.get(id) !== t) return;
+    inTurn(async () => {
+      // the focus answer came from a game update after the move; one more and its hover is current
+      await gameTicks(1);
       if (t.moved || t.lifted || pinch || touches.get(id) !== t || t.pressed) return;
+      moveTo(t.x0, t.y0);
       mouse('pointerdown', t.x0, t.y0, 0, 1);
       t.pressed = performance.now();
     });
   }
   // Let a pressed button out: where it was pressed (a click), or off the screen (no click: a long
   // press is a hover, for the tooltip), then back over it so the tooltip stays.
-  async function pressOut(t, click) {
-    await afterFrame();                                // never the same frame as the press
-    if (click) { moveTo(t.x0, t.y0, 1); mouse('pointerup', t.x0, t.y0, 0, 0); return; }
-    moveTo(-40, -40, 1); mouse('pointerup', -40, -40, 0, 0);
-    await afterFrame(); moveTo(t.x0, t.y0);
+  function pressOut(t, click) {
+    return inTurn(async () => {
+      await settle();                                  // never the same game update as the press
+      if (click) { moveTo(t.x0, t.y0, 1); mouse('pointerup', t.x0, t.y0, 0, 0); return; }
+      moveTo(-40, -40, 1); mouse('pointerup', -40, -40, 0, 0);
+      await afterFrame(); moveTo(t.x0, t.y0);
+    });
   }
   world.addEventListener('pointermove', (e) => {
     const t = touches.get(e.pointerId);
@@ -1441,7 +1490,7 @@ return table.concat(t, "\\n")`;
       // (the tooltip) or a cancelled touch lets go off the button.
       const quick = t.lifted && e.timeStamp - t.s0 < LONG_MS;
       pressOut(t, quick);
-      if (quick) { status.taps += 1; lastTap = { t: performance.now(), x: t.x0, y: t.y0 }; }
+      if (quick) { status.taps += 1; lastTap = { t: 0, x: 0, y: 0 }; }   // a window tap never starts a double-tap
       touches.delete(e.pointerId);
       return;
     }
@@ -1453,10 +1502,16 @@ return table.concat(t, "\\n")`;
     else if (!t.moved && e.type === 'pointerup' && e.timeStamp - t.s0 < LONG_MS && (!t.waiting || sloppyTap(t, t.x, t.y))) {
       t.x = t.x0; t.y = t.y0;                          // the tap is where the finger landed, not where it rolled to
       const now = performance.now();
-      const dbl = now - lastTap.t < 320 && Math.hypot(t.x - lastTap.x, t.y - lastTap.y) < 36;
-      click(t.x, t.y, dbl ? 2 : 0);
       status.taps += 1;
-      lastTap = dbl ? { t: 0, x: 0, y: 0 } : { t: now, x: t.x, y: t.y };
+      // a window or the world? A quick tap can lift before the game has said (a frame): wait for it,
+      // so two quick taps on a window's button are two clicks, not a click and a right-click
+      const decide = () => {
+        const dbl = !onWindow(t) && now - lastTap.t < 320 && Math.hypot(t.x - lastTap.x, t.y - lastTap.y) < 36;
+        click(t.x, t.y, dbl ? 2 : 0);
+        lastTap = dbl || onWindow(t) ? { t: 0, x: 0, y: 0 } : { t: now, x: t.x, y: t.y };
+      };
+      if (t.focus === null || t.focus === undefined) Promise.race([t.focusP, wait(300)]).then(decide, decide);
+      else decide();
     }
     touches.delete(e.pointerId);
   };

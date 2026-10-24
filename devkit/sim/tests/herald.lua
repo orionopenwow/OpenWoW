@@ -250,10 +250,11 @@ T.test("Herald: while he plays, the realm's refusals of his tries stay off the s
     T.eq(table.getn(shown), 3, "back when you play")
 end)
 
-T.test("Herald: his orders keep the mount on (he rides whenever he travels, if he has one)", function()
+T.test("Herald: his orders keep the mount off for now (he travels on foot)", function()
     local env = T.addon("Herald")
     local n = table.getn(env.__chat_sent)
     api.fire(env, "CHAT_MSG_SYSTEM", "Enable player ai")
     api.tick(env, 3)
-    T.ok(find(said(env, n), ",+mount"), "+mount rides with the goal")
+    T.ok(find(said(env, n), ",-mount"), "-mount rides with the goal")
+    T.ok(not find(said(env, n), ",+mount"), "never +mount")
 end)

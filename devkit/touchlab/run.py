@@ -28,12 +28,22 @@ PROFILES = [
     # a busy phone: the game takes ~70 ms a frame (about 14 fps) on the page's own thread
     ("Slow phone 14 fps", {"width": 914, "height": 411}, 2.625, "&work=70&luams=90"),
     ("Very slow phone 8 fps", {"width": 914, "height": 411}, 2.625, "&work=120&luams=150"),
+    # the game's update on its own clock, behind the page's frames (Android Chrome, 2026-10-24)
+    ("Game lags the page (an update every 90 ms)", {"width": 914, "height": 411}, 2.625, "&gamelag=90"),
     # in the world: taps go through the world layer (camera drags, targeting, game windows)
     ("In world: Android", {"width": 914, "height": 411}, 2.625, "&state=inworld&luams=40"),
     # (no busy frames here: the lab's synthetic touches would wait on them and turn a tap into a long press;
     #  a phone stamps touches with the hardware's time, so a slow game can't do that to a real tap)
     ("In world: slow bridge (Lua answers in 150 ms)", {"width": 914, "height": 411}, 2.625, "&state=inworld&luams=150"),
+    ("In world: game lags the page (an update every 90 ms)", {"width": 914, "height": 411}, 2.625, "&state=inworld&gamelag=90"),
 ]
+
+
+def slow_ms(extra, fast):
+    """How long a case waits for the click to play out: a tap waits for the game's own updates."""
+    if "work=120" in extra:
+        return 3500
+    return 2200 if any(k in extra for k in ("work=", "gamelag=", "luams=150")) else max(fast, 900)
 
 
 def serve():
@@ -70,7 +80,7 @@ def main():
             for label, dx, dy in plain:   # snapping is for the glue screens; game windows in the world take the tap as is
                 before = page.evaluate("lab.clicks")
                 page.touchscreen.tap(b["x"] + dx, b["y"] + dy)
-                page.wait_for_timeout(1500 if "work=" in extra else 500)
+                page.wait_for_timeout(slow_ms(extra, 500))
                 after = page.evaluate("lab.clicks")
                 cases.append((label, after - before == 1))
             # a real thumb: it lands, rolls a few pixels while down, and lifts (raw CDP touches)
@@ -86,17 +96,42 @@ def main():
                     page.wait_for_timeout(hold // 3)
                     touch("touchMove", x + roll * k / 3, y + roll * k / 6)
                 touch("touchEnd", 0, 0)
-                page.wait_for_timeout(1500 if "work=" in extra else 600)   # a slow phone finishes the click a few frames later
+                page.wait_for_timeout(slow_ms(extra, 600))   # a slow phone finishes the click a few frames later
                 cases.append((label, page.evaluate("lab.clicks") - before == 1))
+            if "inworld" not in extra:
+                # Android Chrome: the address bar moves while the finger is down, and the page's
+                # height changes by a few px under the tap; the tap must still click
+                x, y = b["x"], b["y"]
+                before = page.evaluate("lab.clicks")
+                touch("touchStart", x, y)
+                page.wait_for_timeout(60)
+                page.set_viewport_size({"width": vp["width"], "height": vp["height"] - 6})
+                page.wait_for_timeout(60)
+                touch("touchEnd", 0, 0)
+                page.wait_for_timeout(slow_ms(extra, 800))
+                cases.append(("tap while the address bar resizes the page by 6 px", page.evaluate("lab.clicks") - before == 1))
+                page.set_viewport_size(vp)
+                page.wait_for_timeout(1000)
+                b = page.evaluate("lab.buttonCss()")
+                # a quick tap the browser ends with pointercancel instead of pointerup
+                before = page.evaluate("lab.clicks")
+                page.evaluate("""([x, y]) => new Promise((done) => {
+                  const el = document.elementFromPoint(x, y);
+                  const o = { bubbles: true, cancelable: true, pointerId: 77, pointerType: 'touch', isPrimary: true, clientX: x, clientY: y };
+                  el.dispatchEvent(new PointerEvent('pointerdown', { ...o, button: 0, buttons: 1 }));
+                  setTimeout(() => { el.dispatchEvent(new PointerEvent('pointercancel', { ...o, button: 0, buttons: 0 })); done(); }, 70);
+                })""", [b["x"], b["y"]])
+                page.wait_for_timeout(slow_ms(extra, 800))
+                cases.append(("a quick tap the browser cancels still clicks", page.evaluate("lab.clicks") - before == 1))
             if "inworld" in extra:
                 # a game window's button: pushed in while the finger is on it, out (the click) on lift
                 x, y = b["x"], b["y"]
                 before = page.evaluate("lab.clicks")
                 touch("touchStart", x, y)
-                page.wait_for_timeout(250)
+                page.wait_for_timeout(250 if slow_ms(extra, 0) < 2000 else 450)   # under LONG_MS (500): still a tap
                 held_down = page.evaluate("lab.down")
                 touch("touchEnd", 0, 0)
-                page.wait_for_timeout(600)
+                page.wait_for_timeout(slow_ms(extra, 600))
                 cases.append(("a button shows pushed while the finger is on it, and clicks on lift",
                               held_down and page.evaluate("lab.clicks") - before == 1 and not page.evaluate("lab.down")))
                 # held past a long press: the tooltip, no click, and nothing left pushed
@@ -105,18 +140,28 @@ def main():
                 touch("touchStart", x, y)
                 page.wait_for_timeout(800)
                 touch("touchEnd", 0, 0)
-                page.wait_for_timeout(700)
+                page.wait_for_timeout(slow_ms(extra, 700))
                 cases.append(("a long press on a button: no click, and it pops back out",
                               page.evaluate("lab.clicks") == before and not page.evaluate("lab.down")))
-                # a double-tap: the second tap is a right-click (use, open), not a second left click
+                # two quick taps on a window's button are two clicks (paging, +/-, Next), never a right-click
                 page.wait_for_timeout(500)
                 before, rbefore = page.evaluate("lab.clicks"), page.evaluate("lab.rclicks")
                 page.touchscreen.tap(x, y)
                 page.wait_for_timeout(150)
                 page.touchscreen.tap(x, y)
-                page.wait_for_timeout(900)
-                cases.append(("a double-tap on a button: a click, then a right-click",
-                              page.evaluate("lab.clicks") - before == 1 and page.evaluate("lab.rclicks") - rbefore == 1))
+                page.wait_for_timeout(slow_ms(extra, 900))
+                cases.append(("two quick taps on a window's button: two clicks, no right-click",
+                              page.evaluate("lab.clicks") - before == 2 and page.evaluate("lab.rclicks") == rbefore))
+                # in the world a double-tap is still a right-click (talk, loot, open)
+                page.wait_for_timeout(500)
+                wx, wy = vp["width"] * 0.62, vp["height"] * 0.3
+                rp = page.evaluate("lab.rpresses || 0")
+                page.touchscreen.tap(wx, wy)
+                page.wait_for_timeout(150)
+                page.touchscreen.tap(wx, wy)
+                page.wait_for_timeout(slow_ms(extra, 900))
+                cases.append(("a double-tap in the world is a right-click",
+                              page.evaluate("lab.rpresses || 0") - rp == 1))
             cdp.detach()
             info = page.evaluate("({ ignored: lab.ignored, debug: document.querySelector('#ow-touch .tdebug')?.textContent || '', "
                                  "moves: lab.events.filter(e => e.t === 'moved').length })")

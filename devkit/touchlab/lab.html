@@ -52,7 +52,7 @@ function draw() {
 // -- the stand-in for winit 0.30.13 (platform_impl/web/web_sys/pointer.rs, event.rs) --------------
 const scale = () => dpr;                                // winit: offset x the window's scale factor, always
 const pos = (e) => ({ x: e.offsetX * scale(), y: e.offsetY * scale() });
-const send = (ev) => { lab.events.push(ev); if (lab.events.length > 200) lab.events.shift(); onEngine(ev); };
+const send = (ev) => { lab.events.push(ev); if (lab.events.length > 200) lab.events.shift(); if (Number(q.get('gamelag'))) inbox.push(ev); else onEngine(ev); };
 c.addEventListener('pointermove', (e) => {
   if (e.button >= 0) { send({ t: 'button', ...pos(e) }); return; }          // chorded button
   const list = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [e];
@@ -76,6 +76,7 @@ function onEngine(ev) {
   if (ev.t === 'pressed') {
     pressedOn = hoverAtFrame;                           // what the last frame saw under the cursor
     pressedButton = ev.b;
+    if (ev.b === 2) lab.rpresses = (lab.rpresses || 0) + 1;
     if (!pressedOn) lab.ignored += 1;
   }
   if (ev.t === 'released') {
@@ -87,16 +88,25 @@ function onEngine(ev) {
 }
 // ?work=<ms>: a slow phone. Each game frame keeps the page busy this long (the real client draws on
 // the same thread), so frames come every ~work ms and timers and touch events wait for them.
+// ?gamelag=<ms>: the game's update runs on its own clock, every <ms>, not on the page's animation
+// frames (a phone where the game can't keep up): a page frame no longer means a game frame, so the
+// input of two page frames can land in one game update. Input queues until the game's next update,
+// as winit's does, and the hover is taken after that update's input.
 const WORK = Number(q.get('work')) || 0;
+const LAG = Number(q.get('gamelag')) || 0;
+const inbox = [];
+const luaWaiting = [];
 function frame() {
   if (WORK) { const t0 = performance.now(); while (performance.now() - t0 < WORK) {} }
   lab.frames += 1;
+  if (LAG) { for (const ev of inbox.splice(0)) onEngine(ev); }
   hoverAtFrame = over(lab.cursor);
   lab.hover = hoverAtFrame;
   draw();
-  requestAnimationFrame(frame);
+  for (const ok of luaWaiting.splice(0)) ok();       // the bridge answers Lua from inside an update
+  if (LAG) setTimeout(frame, LAG); else requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+if (LAG) setTimeout(frame, LAG); else requestAnimationFrame(frame);
 
 // -- the bridge the touch layer talks to (window.wenilla on the real page) ------------------------
 const listeners = {};
@@ -106,7 +116,8 @@ window.wenilla = window.__wenilla = {
   hold() {}, fire(n) { lab.events.push({ t: 'fire', n }); }, chat() {},
   // the real bridge answers a Lua call a frame or two later (?luams=, default 0): over the button
   // GetMouseFocus() names it, elsewhere it is the world
-  lua: (code) => new Promise((ok) => setTimeout(() => ok(/GetMouseFocus/.test(code) ? [lab.hover ? 'EnterWorldButton' : 'WorldFrame'] : []), Number(q.get('luams')) || 0)),
+  // (answered at the game's next update, then ?luams= later, as the real bridge answers from inside one)
+  lua: (code) => new Promise((ok) => luaWaiting.push(() => setTimeout(() => ok(/GetMouseFocus/.test(code) ? [lab.hover ? 'EnterWorldButton' : 'WorldFrame'] : [1]), Number(q.get('luams')) || 0))),
   on(ev, fn) { (listeners[ev] ||= []).push(fn); },
 };
 const base = new URL('../../realm/www/', location.href).href;

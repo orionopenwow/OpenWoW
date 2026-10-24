@@ -32,8 +32,8 @@ local GOALS = {
 -- Always off on your own character: the bot AI's selling, auction house, mail, bank, guild, crafting,
 -- battleground, duel and chatter habits (its vendor runs would sell even an epic mount), and its
 -- "maintenance" (destroys, disenchants and opens items, abandons quests).
--- "+mount": he rides whenever he travels, if he has a mount (every character does from level 1 here).
-local SAFE = "-rpg vendor,-rpg bank,-rpg guild,-rpg craft,-rpg bg,-rpg player,-maintenance,-guild,-pvp,-bg,-arena,-lfg,-duel,-start duel,-ads,-ai chat,-say,-emote,+silent,+mount"
+-- "-mount": he travels on foot for now (owner, 2026-10-24); "+mount" brings riding back.
+local SAFE = "-rpg vendor,-rpg bank,-rpg guild,-rpg craft,-rpg bg,-rpg player,-maintenance,-guild,-pvp,-bg,-arena,-lfg,-duel,-start duel,-ads,-ai chat,-say,-emote,+silent,-mount"
 
 -- In a fight, every goal: never run from a fight he can win. The bot AI's "flee" makes a character
 -- playing alone run as soon as two mobs are on him and he has lost any health (it counts itself as
