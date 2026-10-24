@@ -36,12 +36,17 @@ PROFILES = [
     #  a phone stamps touches with the hardware's time, so a slow game can't do that to a real tap)
     ("In world: slow bridge (Lua answers in 150 ms)", {"width": 914, "height": 411}, 2.625, "&state=inworld&luams=150"),
     ("In world: game lags the page (an update every 90 ms)", {"width": 914, "height": 411}, 2.625, "&state=inworld&gamelag=90"),
+    # a budget Android: the whole page runs 6x slower (Chrome's CPU throttling) and the game updates
+    # every 120 ms on top of that
+    ("In world: budget Android (CPU 6x slower, game every 120 ms)", {"width": 800, "height": 360}, 2, "&state=inworld&gamelag=120&luams=60&cpu=6"),
+    ("In world: struggling phone (5 fps game, Lua answers in 150 ms, CPU 4x slower)", {"width": 800, "height": 360}, 2, "&state=inworld&gamelag=200&luams=150&cpu=4"),
+    ("Budget Android on the glue screens (CPU 6x slower)", {"width": 800, "height": 360}, 2, "&gamelag=120&cpu=6"),
 ]
 
 
 def slow_ms(extra, fast):
     """How long a case waits for the click to play out: a tap waits for the game's own updates."""
-    if "work=120" in extra:
+    if "work=120" in extra or "cpu=" in extra:
         return 3500
     return 2200 if any(k in extra for k in ("work=", "gamelag=", "luams=150")) else max(fast, 900)
 
@@ -68,6 +73,8 @@ def main():
             page = ctx.new_page()
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e)))
+            if "cpu=" in extra:   # the page as slow as a budget phone's: timers, events, the touch layer itself
+                ctx.new_cdp_session(page).send("Emulation.setCPUThrottlingRate", {"rate": int(extra.split("cpu=")[1].split("&")[0])})
             page.goto(url + extra)
             page.wait_for_function("window.lab && window.lab.ready && window.lab.frames > 5", timeout=15000)
             page.wait_for_timeout(1200)                           # the button scan runs every 0.8 s
@@ -128,17 +135,35 @@ def main():
                 x, y = b["x"], b["y"]
                 before = page.evaluate("lab.clicks")
                 touch("touchStart", x, y)
-                page.wait_for_timeout(250 if slow_ms(extra, 0) < 2000 else 450)   # under LONG_MS (500): still a tap
+                # a hold long enough to see it go in: on a 5 fps phone that takes ~0.5 s, still a tap (SLOW_TAP_MS)
+                page.wait_for_timeout(250 if slow_ms(extra, 0) < 2000 else 450 if "gamelag=200" not in extra else 800)
                 held_down = page.evaluate("lab.down")
                 touch("touchEnd", 0, 0)
                 page.wait_for_timeout(slow_ms(extra, 600))
                 cases.append(("a button shows pushed while the finger is on it, and clicks on lift",
                               held_down and page.evaluate("lab.clicks") - before == 1 and not page.evaluate("lab.down")))
+                # a player taps, sees the button go in, then lifts: that is a click, however long the
+                # game took to show it pushed ("only presses in, never clicks", phone, 2026-10-24)
+                page.wait_for_timeout(500)
+                before = page.evaluate("lab.clicks")
+                touch("touchStart", x, y)
+                t_in = page.evaluate("performance.now()")
+                try:
+                    page.wait_for_function("lab.down", timeout=3000)
+                    seen = True
+                    print(f"      ({name}: it showed pushed {page.evaluate('performance.now()') - t_in:.0f} ms after the touch)")
+                except Exception:
+                    seen = False
+                page.wait_for_timeout(350)                     # a person sees it go in, then lifts (~0.35 s)
+                touch("touchEnd", 0, 0)
+                page.wait_for_timeout(slow_ms(extra, 700))
+                cases.append(("hold until it shows pushed, then lift: it clicks",
+                              seen and page.evaluate("lab.clicks") - before == 1 and not page.evaluate("lab.down")))
                 # held past a long press: the tooltip, no click, and nothing left pushed
                 page.wait_for_timeout(400)
                 before = page.evaluate("lab.clicks")
                 touch("touchStart", x, y)
-                page.wait_for_timeout(800)
+                page.wait_for_timeout(1400)                   # a deliberate hold, to read the tooltip
                 touch("touchEnd", 0, 0)
                 page.wait_for_timeout(slow_ms(extra, 700))
                 cases.append(("a long press on a button: no click, and it pops back out",

@@ -45,7 +45,7 @@
 // Shown on the ?touchdebug=1 line, so a phone can tell at a glance which build it is running.
 import { gamePointerEvent } from './input.js';
 
-export const TOUCH_BUILD = '2026-10-24 game-tick taps';
+export const TOUCH_BUILD = '2026-10-24 clicks when it shows pushed';
 
 const LS = (k, v) => {
   try {
@@ -559,6 +559,15 @@ const moveTo = (x, y, buttons = 0) => mouse('pointermove', x, y, -1, buttons);
 // gesture that did turn into a drag (SLOPPY_PX, SLOPPY_MS) still ends as a click where it landed.
 const TAP_SLOP = 20, SLOPPY_PX = 32, SLOPPY_MS = 450;
 const LONG_MS = 500;   // a press held this long is a long-press (hover, tooltips), as on Android
+// A game button shows pushed only once the game has said it is under the finger, which on a slow
+// phone is 0.2-0.5 s after the touch. Players lift when they see it go in, so a long press on a
+// pushed button is timed from when it showed pushed, not from the touch: lifting within HOLD_MS of
+// that is the click. Before, a lift ~0.35 s after it went in was past LONG_MS from the touch, and the
+// button popped back out without clicking ("only presses in, never clicks", phone, 2026-10-24).
+const HOLD_MS = 700;
+// and a tap on a window the game hadn't shown pushed yet (still asking what is under the finger)
+// is a tap for up to this long: the player saw nothing happen, so they can't have meant a long press
+const SLOW_TAP_MS = 1200;
 const sloppyTap = (t, x, y) => Math.hypot(x - t.x0, y - t.y0) <= SLOPPY_PX && performance.now() - t.t0 < SLOPPY_MS;
 // The game reads the cursor once a frame and only presses what the last frame saw under it, so
 // each step waits for a frame the game has drawn (a timer alone can fall inside one slow frame).
@@ -574,9 +583,11 @@ const wait = (ms) => new Promise((ok) => setTimeout(ok, ms));
 async function gameTicks(n = 2) {
   const w = window.wenilla;
   for (let i = 0; i < n; i++) {
-    // whichever comes first: the game's answer, or two page frames (no VM, or a bridge that is busy)
-    const frames = afterFrame().then(afterFrame);
-    await (w?.lua ? Promise.race([w.lua('return 1', 1500).catch(() => frames), frames]) : frames);
+    // the game's answer; two page frames only when there is no VM, or the bridge hasn't answered in
+    // 0.4 s (busy). Not "whichever comes first": on a phone whose game lags the page, two page frames
+    // come before the game's next update, and the press went in before the move did.
+    const frames = () => afterFrame().then(afterFrame);
+    await (w?.lua ? Promise.race([w.lua('return 1', 1500).catch(frames), wait(400).then(frames)]) : frames());
   }
 }
 const settle = () => gameTicks(2);
@@ -1475,7 +1486,9 @@ return table.concat(t, "\\n")`;
     if (uiDrag !== null) {
       const t = touches.get(uiDrag);
       // a rolled tap on a window: let go where it pressed, so the button it landed on clicks
-      if (t) { if (t.lifted && sloppyTap(t, t.x, t.y)) { moveTo(t.x0, t.y0, 1); mouse('pointerup', t.x0, t.y0, 0, 0); } else mouse('pointerup', t.x, t.y, 0, 0); }
+      const rolled = t && t.lifted && (sloppyTap(t, t.x, t.y)
+        || (t.pressed && Math.hypot(t.x - t.x0, t.y - t.y0) <= SLOPPY_PX && performance.now() - t.pressed < HOLD_MS));
+      if (t) { if (rolled) { moveTo(t.x0, t.y0, 1); mouse('pointerup', t.x0, t.y0, 0, 0); } else mouse('pointerup', t.x, t.y, 0, 0); }
       uiDrag = null;
     }
   }
@@ -1488,7 +1501,7 @@ return table.concat(t, "\\n")`;
     if (t.pressed && !t.out && !t.moved && cam !== e.pointerId && uiDrag !== e.pointerId) {
       // pressed in on a game button: out where it went in. A quick lift is the click; a long press
       // (the tooltip) or a cancelled touch lets go off the button.
-      const quick = t.lifted && e.timeStamp - t.s0 < LONG_MS;
+      const quick = t.lifted && performance.now() - t.pressed < HOLD_MS;
       pressOut(t, quick);
       if (quick) { status.taps += 1; lastTap = { t: 0, x: 0, y: 0 }; }   // a window tap never starts a double-tap
       touches.delete(e.pointerId);
@@ -1499,7 +1512,8 @@ return table.concat(t, "\\n")`;
       endCam(); click(t.x0, t.y0, 0); status.taps += 1;
     } else if (cam === e.pointerId || uiDrag === e.pointerId) endCam();
     // a tap: no drag began (or one was still waiting to hear what is under the finger)
-    else if (!t.moved && e.type === 'pointerup' && e.timeStamp - t.s0 < LONG_MS && (!t.waiting || sloppyTap(t, t.x, t.y))) {
+    else if (!t.moved && e.type === 'pointerup' && (e.timeStamp - t.s0 < LONG_MS || ((onWindow(t) || t.focus == null) && e.timeStamp - t.s0 < SLOW_TAP_MS))
+      && (!t.waiting || sloppyTap(t, t.x, t.y))) {
       t.x = t.x0; t.y = t.y0;                          // the tap is where the finger landed, not where it rolled to
       const now = performance.now();
       status.taps += 1;
