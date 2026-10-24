@@ -247,7 +247,7 @@ border-radius:14px;background:#17121c}}h1{{color:{color};font-size:22px;margin:0
 class LoopbackSignIn:
     """One sign-in attempt: `url` opens in the browser, `wait()` returns the one-time code."""
 
-    def __init__(self, portal, switch=False):
+    def __init__(self, portal, switch=False, via=None):
         self.state = _secrets.token_urlsafe(24).replace("-", "a").replace("_", "b")[:32]
         self.code = None
         self.error = None
@@ -288,6 +288,8 @@ class LoopbackSignIn:
         q = {"port": self.port, "state": self.state}
         if switch:
             q["switch"] = "1"
+        if via in ("google", "key"):
+            q["via"] = via      # realm patch 0042: straight to Google, or to the Hero Key page
         self.url = portal.rstrip("/") + "/auth/launcher?" + _urlencode(q)
         _threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
@@ -345,3 +347,52 @@ def launcher_me(portal, token):
 
 def launcher_signout(portal, token):
     _request(portal.rstrip("/") + "/api/launcher/signout", "POST", {}, token=token, timeout=6)
+
+
+# -- Hero Keys in the launcher (realm patch 0042) ---------------------------------------------------
+# The launcher keeps the account's Hero Key (ovk1.<id>.<secret>, encrypted with protect()) and signs in
+# with it on its own: it signs the realm's challenge with the key's Hero ID (Ed25519, the same
+# derivation as the realm's key page), so the key's secret never leaves this PC.
+
+HERO_CHALLENGE = "openvanilla-hero-v1\nchallenge:"
+HERO_ARMOR = ("-----BEGIN OPEN VANILLA HERO KEY-----", "-----END OPEN VANILLA HERO KEY-----")
+
+
+def parse_hero_key(text):
+    """The key line in pasted text or a key file (`ovk1.<10>.<43>`), else None."""
+    import re as _re
+    m = _re.search(r"ovk1\.[A-Za-z0-9]{10}\.[A-Za-z0-9_-]{43}", text or "")
+    return m.group(0) if m else None
+
+
+def hero_key_file(key):
+    """The text of a key file, the realm's own format."""
+    return ("Open Vanilla Hero Key\n\nYour account's own sign-in. Keep it private: anyone with it can play as you.\n"
+            f"{HERO_ARMOR[0]}\n{key}\n{HERO_ARMOR[1]}\n")
+
+
+def hero_sign_in(portal, key):
+    """(ok, info): info is /api/launcher/token's (user, pass, display_name, token) or has `message`."""
+    key = parse_hero_key(key)
+    if not key:
+        return False, {"message": "That doesn't look like a Hero Key. It starts with ovk1. Paste the whole line, or load the key file."}
+    try:
+        from herokey_v2 import HeroKeyV2
+    except ImportError:
+        from .herokey_v2 import HeroKeyV2
+    hk = HeroKeyV2.from_string(key)
+    status, ch = _request(portal.rstrip("/") + "/api/hero/challenge", timeout=10)
+    if status != 200 or not ch.get("challenge"):
+        return False, {"message": ch.get("message") or "The realm didn't answer. Try again in a moment."}
+    sig = hk.sign_message((HERO_CHALLENGE + ch["challenge"]).encode("utf-8"))
+    status, body = _request(portal.rstrip("/") + "/api/launcher/hero", "POST",
+                            {"key_id": hk.key_id, "hero": hk.hero_id, "challenge": ch["challenge"], "sig": sig})
+    if status == 404:
+        return False, {"message": "This realm can't take a Hero Key in the launcher yet. Use Continue with Google."}
+    return status == 200 and bool(body.get("token")), body
+
+
+def launcher_herokey(portal, token, replace=False):
+    """(status, body): {"key": ...} a key made for this launcher, {"has_key": true} the account has one."""
+    return _request(portal.rstrip("/") + "/api/launcher/herokey", "POST", {"replace": bool(replace)}, token=token, timeout=10)
+

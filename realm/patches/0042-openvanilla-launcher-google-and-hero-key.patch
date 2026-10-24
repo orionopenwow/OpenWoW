@@ -1,0 +1,343 @@
+diff --git a/crates/wenilla-realm/src/auth/herokey.rs b/crates/wenilla-realm/src/auth/herokey.rs
+index c9c335a0..92cedc5f 100644
+--- a/crates/wenilla-realm/src/auth/herokey.rs
++++ b/crates/wenilla-realm/src/auth/herokey.rs
+@@ -526,6 +526,9 @@ pub fn router() -> Router<Arc<AppState>> {
+         .route("/auth/hero", post(hero_sign_in))
+         .route("/api/heroes.json", get(heroes_json))
+         .route("/api/hero/verify", post(hero_verify_api).options(open_to_all))
++        // Open Vanilla 0042: the desktop launcher's own Hero Key sign-in and key
++        .route("/api/launcher/hero", post(launcher_hero))
++        .route("/api/launcher/herokey", post(launcher_herokey))
+ }
+ 
+ /// Behind the session: the key page and the in-game window's calls.
+@@ -832,6 +835,99 @@ struct HeroSignIn {
+ /// left the browser. Signs in exactly as `/auth/key` does. `{"ok": true, "to": "<where next>"}`, or
+ /// `{"ok": false, "error": "…"}`; `"fallback": true` asks the page to send the key the old way
+ /// once (a key made before Hero IDs: the realm has no Hero ID for it yet).
++/// `POST /api/launcher/hero` (Open Vanilla 0042): the launcher signs a challenge with the Hero Key it
++/// keeps; the answer is `/api/launcher/token`'s (the game account and a launcher token). Not a browser
++/// form, so no same-site check; the same counters as the other Hero Key sign-ins.
++async fn launcher_hero(
++    State(state): State<Arc<AppState>>,
++    headers: HeaderMap,
++    Json(f): Json<HeroSignIn>,
++) -> Result<Response, AppError> {
++    let no = |status: StatusCode, msg: &str| json_status(status, serde_json::json!({ "ok": false, "message": msg }));
++    let ip = client_ip(&headers);
++    if !state.limiter.allow(&format!("herokey:net:{}", net_of(&headers)), 20, 900) {
++        audit::log(&state.db, None, ip.as_deref(), "login.limited", Some("herokey"), Some("launcher")).await;
++        return Ok(no(StatusCode::TOO_MANY_REQUESTS, "Too many tries. Wait 15 minutes and try again."));
++    }
++    let key_id = f.key_id.trim();
++    if key_id.len() != ID_LEN || !key_id.bytes().all(|b| b.is_ascii_alphanumeric()) {
++        return Ok(no(StatusCode::BAD_REQUEST, "That doesn't look like a Hero Key. It starts with ovk1."));
++    }
++    if !state.limiter.allow(&format!("herokey:id:{key_id}"), 10, 900) {
++        return Ok(no(StatusCode::TOO_MANY_REQUESTS, "Too many tries with that key. Wait 15 minutes and try again."));
++    }
++    if f.challenge.len() > 64 || !take_challenge(&state.db, &f.challenge).await? {
++        return Ok(no(StatusCode::UNAUTHORIZED, "That took too long. Try again."));
++    }
++    let row: Option<(i64, Option<Vec<u8>>, i64)> = sqlx::query_as(
++        "SELECT k.user_id, k.hero_pub, u.disabled FROM hero_keys k JOIN users u ON u.id = k.user_id \
++         WHERE k.key_id = ? AND k.revoked_at IS NULL",
++    )
++    .bind(key_id)
++    .fetch_optional(&state.db)
++    .await?;
++    let failed = "That Hero Key didn't work. It may have been replaced by a newer one: paste your newest key, or sign in with Google and make a new one.";
++    let Some((uid, stored, disabled)) = row else {
++        audit::log(&state.db, None, ip.as_deref(), "login.fail", Some("herokey"), Some("launcher")).await;
++        return Ok(no(StatusCode::UNAUTHORIZED, failed));
++    };
++    // a key made before Hero IDs has no public half yet: the browser's key page fills it in once
++    let Some(stored) = stored.and_then(|p| <[u8; 32]>::try_from(p.as_slice()).ok()) else {
++        return Ok(no(StatusCode::CONFLICT, "Sign in once with this key on the realm's website (I have a Hero Key), then here again."));
++    };
++    let ok = {
++        use subtle::ConstantTimeEq;
++        let same: bool = parse_hero(&f.hero).is_some_and(|h| h.ct_eq(&stored).into());
++        same && hero_verify(&stored, format!("{CHALLENGE_MESSAGE}{}", f.challenge).as_bytes(), &f.sig)
++    };
++    if !ok {
++        audit::log(&state.db, None, ip.as_deref(), "login.fail", Some("herokey"), Some("launcher")).await;
++        return Ok(no(StatusCode::UNAUTHORIZED, failed));
++    }
++    if disabled != 0 {
++        return Ok(no(StatusCode::FORBIDDEN, "This account is disabled — ask an admin."));
++    }
++    let ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
++    mark_used(&state.db, key_id, ua).await;
++    let out = super::launcher::issue(&state, &headers, uid).await?;
++    audit::log(&state.db, Some(uid), ip.as_deref(), "login.ok", Some("herokey"), Some("launcher")).await;
++    Ok(super::launcher::no_store((StatusCode::OK, Json(out)).into_response()))
++}
++
++#[derive(serde::Deserialize, Default)]
++struct LauncherKeyBody {
++    #[serde(default)]
++    replace: bool,
++}
++
++/// `POST /api/launcher/herokey` (Open Vanilla 0042), with the launcher's token: the account's Hero Key
++/// for the launcher to keep. No key yet: one is made and returned (`{"key": "ovk1..."}`). A key
++/// already: `{"has_key": true, "key_id": ...}` (the realm never has its secret), unless
++/// `{"replace": true}`, which makes a new one (the old one stops working at once).
++async fn launcher_herokey(
++    State(state): State<Arc<AppState>>,
++    headers: HeaderMap,
++    body: Option<Json<LauncherKeyBody>>,
++) -> Result<Response, AppError> {
++    let ip = client_ip(&headers);
++    if !state.limiter.allow(&format!("launcher:herokey:{}", net_of(&headers)), 10, 900) {
++        return Err(AppError::TooMany);
++    }
++    let Some(uid) = super::launcher::token_user(&state, &headers).await? else {
++        return Ok(json_status(StatusCode::UNAUTHORIZED, serde_json::json!({ "message": "Signed out — sign in again." })));
++    };
++    let replace = body.map(|b| b.0.replace).unwrap_or(false);
++    if !replace {
++        if let Some(k) = info(&state.db, uid).await? {
++            return Ok(json_status(StatusCode::OK, serde_json::json!({ "has_key": true, "key_id": k.key_id })));
++        }
++    }
++    let key = mint(&state.db, uid).await?;
++    let _ = mark_saved(&state.db, uid).await;     // the launcher keeps it: no reminder in game
++    audit::log(&state.db, Some(uid), ip.as_deref(), "herokey.new", Some("launcher"), None).await;
++    Ok(json_status(StatusCode::OK, serde_json::json!({ "key": key })))
++}
++
+ async fn hero_sign_in(
+     State(state): State<Arc<AppState>>,
+     headers: HeaderMap,
+diff --git a/crates/wenilla-realm/src/auth/launcher.rs b/crates/wenilla-realm/src/auth/launcher.rs
+index d0cca6be..f8fe8db5 100644
+--- a/crates/wenilla-realm/src/auth/launcher.rs
++++ b/crates/wenilla-realm/src/auth/launcher.rs
+@@ -12,6 +12,13 @@
+ //!
+ //! `?switch=1` signs the browser out first and asks Discord to show its account screen, so a
+ //! player can change accounts.
++//!
++//! Open Vanilla 0042: `?via=google` goes straight to Google's sign-in and `?via=key` to the Hero Key
++//! page (the launcher's two buttons); without it, Discord when it is on, else the sign-in page.
++//! The launcher can also sign in with the Hero Key it keeps, with no browser at all:
++//! `POST /api/launcher/hero` (a signed challenge, auth/herokey.rs) answers like `/api/launcher/token`,
++//! and `POST /api/launcher/herokey` (with a launcher token) gives the account its first Hero Key, or
++//! a new one when asked, for the launcher to keep.
+ 
+ use std::sync::Arc;
+ 
+@@ -54,6 +61,7 @@ struct BeginQuery {
+     port: u16,
+     state: String,
+     switch: Option<String>,
++    via: Option<String>,
+ }
+ 
+ fn valid_state(s: &str) -> bool {
+@@ -84,6 +92,14 @@ async fn begin(
+         .build();
+     let mut jar = jar.add(pending);
+     let discord = state.providers.iter().any(|p| p.id() == "discord");
++    // Open Vanilla 0042: the launcher's own buttons
++    let google = state.providers.iter().any(|p| p.id() == "google");
++    let start = match q.via.as_deref() {
++        Some("google") if google => "/auth/google/start",
++        Some("key") => "/key",
++        _ if discord => "/auth/discord/start",
++        _ => "/login",
++    };
+ 
+     if q.switch.is_some() {
+         // Switching accounts: forget this browser's sign-in and let Discord show who is signing in.
+@@ -91,7 +107,7 @@ async fn begin(
+             session::delete_by_token(&state.db, c.value()).await?;
+         }
+         jar = jar.remove(session::removal_cookie());
+-        let to = if discord { "/auth/discord/start?prompt=consent" } else { "/login" };
++        let to = if q.via.is_none() && discord { "/auth/discord/start?prompt=consent" } else { start };
+         return Ok((jar, Redirect::to(to)).into_response());
+     }
+ 
+@@ -105,8 +121,7 @@ async fn begin(
+             }
+         }
+     }
+-    let to = if discord { "/auth/discord/start" } else { "/login" };
+-    Ok((jar, Redirect::to(to)).into_response())
++    Ok((jar, Redirect::to(start)).into_response())
+ }
+ 
+ fn set_fresh(state: &AppState, resp: &mut Response, fresh: Option<String>) {
+@@ -194,7 +209,7 @@ async fn credentials(state: &AppState, user_id: i64) -> Result<serde_json::Value
+     }))
+ }
+ 
+-fn no_store(mut resp: Response) -> Response {
++pub(crate) fn no_store(mut resp: Response) -> Response {
+     resp.headers_mut()
+         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+     resp
+@@ -239,6 +254,14 @@ async fn token(
+         )
+             .into_response());
+     }
++    let out = issue(&state, &headers, user_id).await?;
++    audit::log(&state.db, Some(user_id), ip.as_deref(), "launcher.signin", None, None).await;
++    Ok(no_store((StatusCode::OK, Json(out)).into_response()))
++}
++
++/// A new launcher token for `user_id`, with the game account it logs in with (what `/api/launcher/token`
++/// answers). Open Vanilla 0042: the Hero Key sign-in answers the same.
++pub(crate) async fn issue(state: &AppState, headers: &HeaderMap, user_id: i64) -> Result<serde_json::Value, AppError> {
+     let launcher_token = session::new_token();
+     let t = now();
+     sqlx::query(
+@@ -256,10 +279,26 @@ async fn token(
+     )
+     .execute(&state.db)
+     .await?;
+-    audit::log(&state.db, Some(user_id), ip.as_deref(), "launcher.signin", None, None).await;
+-    let mut out = credentials(&state, user_id).await?;
++    let mut out = credentials(state, user_id).await?;
+     out["token"] = serde_json::Value::String(launcher_token);
+-    Ok(no_store((StatusCode::OK, Json(out)).into_response()))
++    Ok(out)
++}
++
++/// The account a launcher token belongs to (enabled accounts only).
++pub(crate) async fn token_user(state: &AppState, headers: &HeaderMap) -> Result<Option<i64>, AppError> {
++    let Some(tok) = bearer(headers) else {
++        return Ok(None);
++    };
++    let row: Option<(i64, i64)> = sqlx::query_as(
++        "SELECT t.user_id, u.disabled FROM launcher_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?",
++    )
++    .bind(session::hash(&tok))
++    .fetch_optional(&state.db)
++    .await?;
++    Ok(match row {
++        Some((uid, 0)) => Some(uid),
++        _ => None,
++    })
+ }
+ 
+ fn bearer(headers: &HeaderMap) -> Option<String> {
+diff --git a/crates/wenilla-realm/tests/signin.rs b/crates/wenilla-realm/tests/signin.rs
+index 5e11458b..377cc234 100644
+--- a/crates/wenilla-realm/tests/signin.rs
++++ b/crates/wenilla-realm/tests/signin.rs
+@@ -1461,3 +1461,110 @@ async fn with_google_on_the_order_is_play_now_then_google_then_discord() {
+         std::env::remove_var(k);
+     }
+ }
++
++// -- Open Vanilla 0042: the launcher's Google button and its own Hero Key sign-in -------------------
++
++#[tokio::test]
++async fn the_launcher_signs_in_with_google_or_its_own_hero_key() {
++    let _env = DISCORD_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++    std::env::set_var("OPENVANILLA_GUESTS", "1");
++    std::env::remove_var("DISCORD_SIGNIN");
++    let g = mock_google().await;
++    std::env::set_var("GOOGLE_CLIENT_ID", "123-abc.apps.googleusercontent.com");
++    std::env::set_var("GOOGLE_CLIENT_SECRET", "gs");
++    std::env::set_var("GOOGLE_AUTHORIZE_URL", format!("{g}/authorize"));
++    std::env::set_var("GOOGLE_TOKEN_URL", format!("{g}/token"));
++    std::env::set_var("GOOGLE_USERINFO_URL", format!("{g}/userinfo"));
++    let google = wenilla_realm::auth::google::Google::from_env().unwrap().unwrap();
++    let h = harness_with(vec![Arc::new(google)]).await;
++    run_setup(&h).await;
++
++    // Continue with Google: straight to Google, then back through the launcher's finish
++    let r = send(&h.app, get("/auth/launcher?port=50123&state=abcdefghijklmnopqrstuvwx&via=google", None)).await;
++    assert_eq!(r.location(), "/auth/google/start", "{}", r.body);
++    let pending = named(&r, "wr_launcher").expect("the launcher waits");
++    let r = send(&h.app, get("/auth/google/start", Some(&pending))).await;
++    assert!(r.location().starts_with(&format!("{g}/authorize")), "{}", r.location());
++    let state = query_param(r.location(), "state");
++    let oauth = named(&r, "wr_oauth").unwrap();
++    let r = send(&h.app, get(&format!("/auth/google/callback?code=OK&state={state}"), Some(&format!("{pending}; {oauth}")))).await;
++    assert_eq!(r.location(), "/auth/launcher/finish", "{}", r.body);
++    let sess = named(&r, "wr_session").expect("signed in with Google");
++    let r = send(&h.app, get("/auth/launcher/finish", Some(&format!("{pending}; {sess}")))).await;
++    assert!(r.location().starts_with("http://127.0.0.1:50123/openvanilla-signin?code="), "{}", r.location());
++    let code = query_param(r.location(), "code");
++    let r = send(&h.app, json_post("/api/launcher/token", serde_json::json!({ "code": code }))).await;
++    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
++    let creds: serde_json::Value = serde_json::from_str(&r.body).unwrap();
++    let token = creds["token"].as_str().unwrap().to_string();
++    let game_user = creds["user"].as_str().unwrap().to_string();
++
++    // the Hero Key page and the switch both follow `via`
++    let r = send(&h.app, get("/auth/launcher?port=50123&state=abcdefghijklmnopqrstuvwx&via=key", None)).await;
++    assert_eq!(r.location(), "/key");
++    let r = send(&h.app, get("/auth/launcher?port=50123&state=abcdefghijklmnopqrstuvwx&switch=1&via=google", Some(&sess))).await;
++    assert_eq!(r.location(), "/auth/google/start");
++
++    // the launcher keeps the account's Hero Key: the first is made for it
++    let mut req = json_post("/api/launcher/herokey", serde_json::json!({}));
++    req.headers_mut().insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
++    let r = send(&h.app, req).await;
++    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
++    let j: serde_json::Value = serde_json::from_str(&r.body).unwrap();
++    let key = j["key"].as_str().expect("a first key").to_string();
++    assert!(key.starts_with("ovk1."), "{key}");
++    // asked again: the realm never shows a key twice
++    let mut req = json_post("/api/launcher/herokey", serde_json::json!({}));
++    req.headers_mut().insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
++    let j: serde_json::Value = serde_json::from_str(&send(&h.app, req).await.body).unwrap();
++    assert_eq!(j["has_key"], true);
++    assert!(j.get("key").is_none());
++    // no token: nothing
++    let r = send(&h.app, json_post("/api/launcher/herokey", serde_json::json!({}))).await;
++    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
++
++    // and signs in with it later, no browser: a signed challenge, the same answer as the token
++    let launcher = |path: &str, body: serde_json::Value| {
++        Request::post(path).header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())).unwrap()
++    };
++    let challenge = new_challenge(&h).await;
++    let sig = herokey::hero_sign(&key[16..], format!("openvanilla-hero-v1\nchallenge:{challenge}").as_bytes()).unwrap();
++    let body = serde_json::json!({ "key_id": &key[5..15], "hero": hero_of(&key), "challenge": challenge, "sig": sig });
++    let r = send(&h.app, launcher("/api/launcher/hero", body.clone())).await;
++    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
++    let j: serde_json::Value = serde_json::from_str(&r.body).unwrap();
++    assert_eq!(j["user"].as_str().unwrap(), game_user, "the same game account");
++    assert!(j["token"].as_str().unwrap().len() > 20 && j["pass"].as_str().is_some());
++    // a challenge works once
++    let r = send(&h.app, launcher("/api/launcher/hero", body)).await;
++    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
++    // a wrong signature fails
++    let challenge = new_challenge(&h).await;
++    let other = herokey::hero_sign(&key[16..], b"something else").unwrap();
++    let body = serde_json::json!({ "key_id": &key[5..15], "hero": hero_of(&key), "challenge": challenge, "sig": other });
++    assert_eq!(send(&h.app, launcher("/api/launcher/hero", body)).await.status, StatusCode::UNAUTHORIZED);
++    // a replaced key stops at once
++    let mut req = json_post("/api/launcher/herokey", serde_json::json!({ "replace": true }));
++    req.headers_mut().insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
++    let j: serde_json::Value = serde_json::from_str(&send(&h.app, req).await.body).unwrap();
++    let newer = j["key"].as_str().unwrap().to_string();
++    assert_ne!(newer, key);
++    let challenge = new_challenge(&h).await;
++    let sig = herokey::hero_sign(&key[16..], format!("openvanilla-hero-v1\nchallenge:{challenge}").as_bytes()).unwrap();
++    let body = serde_json::json!({ "key_id": &key[5..15], "hero": hero_of(&key), "challenge": challenge, "sig": sig });
++    assert_eq!(send(&h.app, launcher("/api/launcher/hero", body)).await.status, StatusCode::UNAUTHORIZED);
++
++    for k in ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_AUTHORIZE_URL", "GOOGLE_TOKEN_URL", "GOOGLE_USERINFO_URL"] {
++        std::env::remove_var(k);
++    }
++}
++
++/// The launcher (launcher/herokey_v2.py) makes the same Hero ID and signature from a key as the realm.
++#[test]
++fn the_launchers_hero_id_matches_the_realms() {
++    let secret = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
++    assert_eq!(herokey::hero_id(&herokey::hero_pub_of(secret).unwrap()), "ovh1.GVSN6lA0SzCD8nQfZIyrChuVy5ERLpDJNQT1xssI-Sg");
++    let pubk = herokey::hero_pub_of(secret).unwrap();
++    assert!(herokey::hero_verify(&pubk, b"openvanilla-hero-v1\nchallenge:xyz",
++        "Jj6N8o8wysGSr1KlLlyU3cXs-bONUscRi0tuTWgH4mOuR2ILW3v8wgfoFDDpcZGHGusYKOOrZ3lsrXXsZBTYCg"));
++}

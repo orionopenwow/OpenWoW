@@ -54,7 +54,7 @@ Compatibility labels: **Works**, **Partly**, **Needs fixes**, **Not checked**, a
 
 ## Account {#account-page}
 
-**Sign in to Open Vanilla → Continue in your browser**: the same button for new and returning players. The realm's sign-in page opens (play as a guest, or sign in with Google or a password); it finishes in your browser and comes back **Signed in as …**. Realms with their own passwords: **Have a realm password instead? Sign in with it ›**, with **Remember me on this PC (saved encrypted)**.
+**Sign in to Open Vanilla** has two ways in, the same for new and returning players. **Continue with Google** opens Google's page in your browser; the first time, the realm makes your account, and the launcher keeps your **Hero Key**. **Have a Hero Key?** paste the line that starts with `ovk1` (or **Load the key file**) and press **Sign in**: no browser and no password. The launcher keeps the key encrypted on this PC and uses it whenever you need signing in (PLAY while signed out, an expired sign-in). Signed in, **Your Hero Key** has **Save a copy** and **Copy**; an account that made its key elsewhere can paste it once, or make a new one (the old one stops working). **Forget it on this PC** removes it. Guests and realms with their own passwords: **Guest or a realm password? Sign in another way ›**, with **Remember me on this PC (saved encrypted)**.
 
 ## Settings {#settings}
 

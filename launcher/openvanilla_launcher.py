@@ -1423,7 +1423,7 @@ class Launcher(tk.Tk):
         elif getattr(self, "_discord_flow", None):
             name, sub, col = "Signing in…", "Finish in your browser", AMBER
         else:
-            name, sub, col = "Sign in", "in your browser", MUTED
+            name, sub, col = "Sign in", "Google or Hero Key", MUTED
         fnt = tkfont.Font(font=font(10, "bold"))
         tw = max(fnt.measure(name), tkfont.Font(font=font(8)).measure(sub))
         w = 44 + tw + 18
@@ -1445,9 +1445,11 @@ class Launcher(tk.Tk):
             self._paint_pill()
 
     def _chip_click(self):
-        """Signed in → the account page. Not signed in → Discord sign-in starts right away."""
+        """Signed in → the account page. Not signed in → the saved Hero Key signs in at once, else the
+        account page with Google and Hero Key."""
         if not (self.session.get("user") and self.session.get("password")) and not getattr(self, "_discord_flow", None):
-            self.sign_in_discord()
+            if self._saved_hero_key():
+                self.sign_in_auto()
         self.show_page("account")
 
     def _paint_pill(self):
@@ -2202,11 +2204,11 @@ class Launcher(tk.Tk):
             self.cv.create_text(x + 66, y + 48, anchor="w", text="Not signed in", fill=TEXT, font=font(10, "bold"), tags="page")
             waiting = bool(getattr(self, "_discord_flow", None))
             self.cv.create_text(x + 66, y + 66, anchor="w", tags="page", font=font(8),
-                                text="Finish signing in in your browser…" if waiting else "Guest, Google or password",
+                                text="Finish signing in in your browser…" if waiting else "Google or your Hero Key",
                                 fill=AMBER if waiting else MUTED)
             self.pill_button(x + cw - 14, y + 8, 96, 26, "SIGN IN", self._chip_click, style="gold", anchor="ne", size=8)
-            self.pill_button(x + 16, y + 92, cw - 32, 30, "CONTINUE WITH DISCORD", self._chip_click,
-                             style="discord", size=8, icon="discord")
+            self.pill_button(x + 16, y + 92, cw - 32, 30, "CONTINUE WITH GOOGLE", lambda: self.sign_in_google(),
+                             style="gold", size=8)
 
         y += h + gap
 
@@ -5023,41 +5025,86 @@ class Launcher(tk.Tk):
             self._account_discord(x, y, w, h)
 
     def _account_discord(self, x, y, w, h):
-        """Not signed in: Discord first. One button signs in or signs up (the realm makes the account
-        and joins the Open Vanilla Discord); a password form is one click away for realm-password accounts."""
+        """Not signed in: Google (in the browser) or the Hero Key (here, no browser). New or returning, the
+        same buttons: Google makes the account the first time, and the launcher keeps its Hero Key."""
         flow = getattr(self, "_discord_flow", None)
-        cw = 460
-        self.card(x, y, cw, 300, "acct_dc", "acct_dc")
-        f = self.frame_on(x + 26, y + 24, cw - 52, 260, bg=PANEL)
+        cw = 470
+        self.card(x, y, cw, 330, "acct_dc", "acct_dc")
+        f = self.frame_on(x + 26, y + 22, cw - 52, 296, bg=PANEL)
         if flow:
             tk.Label(f, text="FINISH IN YOUR BROWSER", bg=PANEL, fg=GOLD, font=font(13, "bold", True)).pack(anchor="w")
-            tk.Label(f, text="The realm's sign-in page opened in your browser. Sign in there and you'll be "
-                             "signed in here automatically.", bg=PANEL, fg=TEXT,
+            tk.Label(f, text="A sign-in page opened in your browser. Finish there and you'll be signed in here "
+                             "automatically.", bg=PANEL, fg=TEXT,
                      font=font(9), wraplength=cw - 60, justify="left").pack(anchor="w", pady=(8, 16))
             row = tk.Frame(f, bg=PANEL)
             row.pack(anchor="w")
             self.wbutton(row, "Open it again", lambda: safe_open(flow.url), primary=True).pack(side="left")
             self.wbutton(row, "Cancel", self.cancel_discord).pack(side="left", padx=8)
+        elif getattr(self, "_hero_busy", False):
+            tk.Label(f, text="SIGNING IN…", bg=PANEL, fg=GOLD, font=font(13, "bold", True)).pack(anchor="w")
+            tk.Label(f, text="Checking your Hero Key with the realm.", bg=PANEL, fg=TEXT, font=font(9)).pack(anchor="w", pady=(8, 0))
         else:
             tk.Label(f, text="SIGN IN TO OPEN VANILLA", bg=PANEL, fg=GOLD, font=font(13, "bold", True)).pack(anchor="w")
-            tk.Label(f, text="New or returning, it's the same button: play as a guest, or sign in with Google or "
-                             "your password on the realm's page. After that, PLAY logs you straight in.",
-                     bg=PANEL, fg=TEXT, font=font(9), wraplength=cw - 60, justify="left").pack(anchor="w", pady=(8, 16))
-            self.wbutton(f, "Continue in your browser", self.sign_in_discord, primary=True, size=10).pack(anchor="w")
+            tk.Label(f, text="New or returning: Google makes your account the first time. After that, PLAY logs "
+                             "you straight in.", bg=PANEL, fg=TEXT, font=font(9), wraplength=cw - 60,
+                     justify="left").pack(anchor="w", pady=(6, 10))
+            self.wbutton(f, "Continue with Google", lambda: self.sign_in_google(), primary=True, size=10).pack(anchor="w")
+            tk.Label(f, text="HAVE A HERO KEY?", bg=PANEL, fg=TAN, font=font(9, "bold")).pack(anchor="w", pady=(16, 2))
+            row = tk.Frame(f, bg=PANEL)
+            row.pack(anchor="w", fill="x")
+            e_key = self.entry(row, show="•", width=26)
+            e_key.pack(side="left", ipady=4)
+            saved = self._saved_hero_key()
+            if saved:
+                e_key.insert(0, saved)
+            self.wbutton(row, "Sign in", lambda: self.sign_in_hero(e_key.get()), icon="key").pack(side="left", padx=(8, 0))
+            e_key.bind("<Return>", lambda ev: self.sign_in_hero(e_key.get()))
+
+            def load():
+                path = filedialog.askopenfilename(parent=self, title="Your Hero Key file",
+                                                  filetypes=[("Hero Key", "*.txt *.key *.ovkey"), ("All files", "*.*")])
+                if not path:
+                    return
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        text = fh.read(20000)
+                except OSError as err:
+                    self._set_acct_msg(f"Couldn't read that file ({err}).", RED)
+                    return
+                self.sign_in_hero(text)
+
+            tk.Label(f, text=("Your saved Hero Key is filled in: press Sign in." if saved else
+                              "Paste the line that starts with ovk1, or"), bg=PANEL, fg=MUTED, font=font(8)).pack(anchor="w", pady=(4, 0))
+            row2 = tk.Frame(f, bg=PANEL)
+            row2.pack(anchor="w", pady=(4, 0))
+            self.wbutton(row2, "Load the key file", load).pack(side="left")
+            if saved:
+                def forget():
+                    if messagebox.askyesno("Forget the Hero Key", "Forget the Hero Key saved on this PC? Keep a copy "
+                                           "first if you have none: it's your account's sign-in.", parent=self):
+                        self.session.pop("hero_key", None)
+                        for k in ("hero_key", "hero_account"):
+                            self.settings.pop(k, None)
+                        self.save_settings()
+                        self.show_page("account", animate=False)
+
+                self.wbutton(row2, "Forget it on this PC", forget).pack(side="left", padx=8)
         self.acct_msg = tk.Label(f, text=getattr(self, "_acct_msg", ("", MUTED))[0], bg=PANEL,
                                  fg=getattr(self, "_acct_msg", ("", MUTED))[1], font=font(9), wraplength=cw - 60, justify="left")
-        self.acct_msg.pack(anchor="w", pady=(14, 0))
+        self.acct_msg.pack(anchor="w", pady=(10, 0))
         if not flow:
-            self.link_text(x, y + 324, "Have a realm password instead? Sign in with it ›",
+            self.link_text(x, y + 350, "Guest or a realm password? Sign in another way ›",
                            lambda: self._acct_mode("signin", password=True), 9)
         rx, rw = x + cw + 30, w - cw - 30
-        self.card(rx, y, rw, 300, "acct_info", "acct_info")
+        self.card(rx, y, rw, 330, "acct_info", "acct_info")
         self.shadow_text(rx + 22, y + 28, "HOW IT WORKS", 10, GOLD)
-        info = ("1.  Press Continue in your browser. The realm's sign-in page opens.\n\n"
-                "2.  Play as a guest, or sign in with Google or your password. If you're already signed in on "
-                "play.openvanilla.app, there's nothing to do.\n\n"
-                "3.  The launcher signs you in and remembers you on this PC. PLAY skips the login screen.\n\n"
-                "Your password never touches the launcher. Switch accounts any time from this page.")
+        info = ("Google:  press Continue with Google and pick your account in the browser. The first time, the "
+                "realm makes your Open Vanilla account.\n\n"
+                "Hero Key:  your account's own sign-in, one line of text. The launcher keeps it for you "
+                "(encrypted on this PC) and signs you in with it, no browser and no password. Keep a copy: "
+                "with it you can sign in on any PC.\n\n"
+                "The launcher never sees your Google password, and your Hero Key never leaves this PC: "
+                "it only signs the realm's challenge.")
         self.cv.create_text(rx + 22, y + 52, anchor="nw", text=info, fill=TEXT, font=font(9), width=rw - 44, tags="page")
 
     def _account_form(self, x, y, w, h):
@@ -5095,8 +5142,10 @@ class Launcher(tk.Tk):
                 self.do_create(e_user.get().strip(), e_pw.get(), e_pw2.get(), var_rem.get())
 
         self.wbutton(btns, "Sign in" if mode == "signin" else "Create account", submit, primary=True).pack(side="left")
-        self.wbutton(btns, "Sign in in your browser instead", lambda: (self._acct_mode("signin", password=False), self.sign_in_discord()),
+        self.wbutton(btns, "Use Google instead", lambda: (self._acct_mode("signin", password=False), self.sign_in_google()),
                      ).pack(side="left", padx=8)
+        self.link_text(x, y + h - 14, "Play as a guest (in your browser) ›",
+                       lambda: (self._acct_mode("signin", password=False), self.sign_in_discord(via=None)), 9)
         for e in (e_user, e_pw, e_pw2):
             if e is not None:
                 e.bind("<Return>", lambda ev: submit())
@@ -5118,10 +5167,22 @@ class Launcher(tk.Tk):
         if portal:
             self.link_text(rx + 22, y + 284, "Open the realm website ›", lambda: safe_open(portal), 9)
 
-    def sign_in_discord(self, switch=False, then=None):
-        """Sign in (or sign up) through the realm's Discord sign-in: the browser does Discord, the realm
-        hands this launcher a one-time code on 127.0.0.1, the code buys the game account. `switch`
-        signs the browser out first so another Discord account can be picked; `then` runs after."""
+    def sign_in_google(self, switch=False, then=None):
+        self.sign_in_discord(switch=switch, then=then, via="google")
+
+    def sign_in_auto(self, then=None):
+        """The saved Hero Key when there is one (no browser), else Google."""
+        key = self._saved_hero_key()
+        if key:
+            self.sign_in_hero(key, then=then, quiet=True)
+        else:
+            self.sign_in_google(then=then)
+
+    def sign_in_discord(self, switch=False, then=None, via="google"):
+        """Sign in (or sign up) in the browser (realm patch 0042: via="google" goes straight to Google,
+        None to the realm's own page: guest or password): the realm hands this launcher a one-time code on
+        127.0.0.1, the code buys the game account. `switch` signs the browser out first so another
+        account can be picked; `then` runs after. (Named for the Discord sign-in it replaced.)"""
         flow = getattr(self, "_discord_flow", None)
         if flow:
             safe_open(flow.url)  # already waiting: just bring the page back
@@ -5134,7 +5195,7 @@ class Launcher(tk.Tk):
             self.notice("This realm doesn't support browser sign-in", AMBER, 5)
             return
         try:
-            flow = account.LoopbackSignIn(portal, switch=switch)
+            flow = account.LoopbackSignIn(portal, switch=switch, via=via)
         except OSError as e:
             self._set_acct_msg(f"Couldn't start the sign-in ({e}).", RED)
             return
@@ -5168,10 +5229,127 @@ class Launcher(tk.Tk):
         self._discord_flow = None
         then, self._after_sign_in = getattr(self, "_after_sign_in", None), None
         if ok:
+            self._signed_in(info, realm_i, "web")
+        else:
+            msg = info.get("message") or "Sign-in failed. Try again."
+            if msg != "Sign-in cancelled.":
+                self.notice(msg, RED, 6)
+            self._acct_msg = (msg, RED if msg != "Sign-in cancelled." else MUTED)
+        self._paint_chip()
+        self.update_status()
+        if self.page in ("account", "play"):
+            self.show_page(self.page, animate=False)
+        if ok and then:
+            self.after(500, then)
+
+    # ----- Hero Keys (realm patch 0042): kept by the launcher, encrypted; sign in with no browser
+
+    def _saved_hero_key(self):
+        key = self.session.get("hero_key")
+        if not key and self.settings.get("hero_key"):
+            key = account.unprotect(self.settings["hero_key"])
+        return key or None
+
+    def _keep_hero_key(self, key):
+        key = account.parse_hero_key(key or "")
+        if not key:
+            return False
+        self.session["hero_key"] = key
+        blob = account.protect(key)
+        if blob:
+            self.settings["hero_key"] = blob
+        else:
+            self.settings.pop("hero_key", None)     # no DPAPI (not Windows): this launcher session only
+        self.save_settings()
+        return True
+
+    def sign_in_hero(self, text, then=None, quiet=False):
+        key = account.parse_hero_key(text or "")
+        if not key:
+            self._set_acct_msg("That doesn't look like a Hero Key. It starts with ovk1. Paste the whole line, "
+                               "or load the key file.", RED)
+            return
+        realm_i = self.realm_index
+        portal = self.realms[realm_i].get("portal")
+        if not safe_url(portal):
+            self._set_acct_msg("This realm has no secure website, so it can't take a Hero Key.", RED)
+            return
+        if getattr(self, "_hero_busy", False):
+            return
+        self._hero_busy = True
+        self._set_acct_msg("Checking your Hero Key…", AMBER)
+        if self.page == "account":
+            self.show_page("account", animate=False)
+
+        def work():
+            ok, info = account.hero_sign_in(portal, key)
+            self.after(0, self._hero_done, ok, info, realm_i, key, then, quiet)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _hero_done(self, ok, info, realm_i, key, then, quiet):
+        self._hero_busy = False
+        if ok:
+            self._signed_in(info, realm_i, "hero", hero_key=key)
+        else:
+            msg = info.get("message") or "That Hero Key didn't work. Try again."
+            self._acct_msg = (msg, RED)
+            self.notice(msg, RED, 6)
+            if quiet:
+                self.show_page("account", animate=False)
+        self._paint_chip()
+        self.update_status()
+        if self.page in ("account", "play"):
+            self.show_page(self.page, animate=False)
+        if ok and then:
+            self.after(500, then)
+
+    def _fetch_hero_key(self, realm_i, token, replace=False):
+        """After a browser sign-in: the account's first Hero Key is made for the launcher to keep. An
+        account that has one already is asked to paste it (the realm never has its secret)."""
+        portal = self.realms[realm_i].get("portal")
+        if not safe_url(portal) or not token:
+            return
+
+        def work():
+            status, body = account.launcher_herokey(portal, token, replace=replace)
+            self.after(0, self._hero_key_fetched, status, body, replace)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _hero_key_fetched(self, status, body, replace):
+        if status == 200 and body.get("key"):
+            self._keep_hero_key(body["key"])
+            self.session.pop("hero_elsewhere", None)
+            self.notice("New Hero Key saved in the launcher" if replace else "Your Hero Key is saved in the launcher", GREEN, 5)
+        elif status == 200 and body.get("has_key"):
+            self.session["hero_elsewhere"] = True
+        if self.page == "account":
+            self.show_page("account", animate=False)
+
+    def _save_hero_key_copy(self):
+        key = self._saved_hero_key()
+        if not key:
+            return
+        path = filedialog.asksaveasfilename(parent=self, title="Save a copy of your Hero Key",
+                                            initialfile="Open Vanilla Hero Key.txt", defaultextension=".txt",
+                                            filetypes=[("Text", "*.txt")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(account.hero_key_file(key))
+            self.notice("Hero Key saved. Keep it somewhere safe.", GREEN, 5)
+        except OSError as e:
+            self.notice(f"Couldn't save it ({e})", RED, 6)
+
+    def _signed_in(self, info, realm_i, via, hero_key=None):
+        """A sign-in (browser or Hero Key) succeeded: the session, remembered encrypted on this PC."""
+        if True:   # (one block, as it was in the browser sign-in's handler)
             user, pw = str(info["user"]).upper(), str(info["pass"])
             display = info.get("display_name") or user.capitalize()
-            self.session = dict(user=user, password=pw, realm=realm_i, verified=True, display=display, via="discord")
-            self.settings.update(account=user, account_display=display, account_via="discord", account_realm=realm_i,
+            self.session = dict(user=user, password=pw, realm=realm_i, verified=True, display=display, via=via)
+            self.settings.update(account=user, account_display=display, account_via=via, account_realm=realm_i,
                                  remember=True)
             for key, value in (("launcher_token", info["token"]), ("saved_password", pw)):
                 blob = account.protect(value)
@@ -5185,17 +5363,15 @@ class Launcher(tk.Tk):
             self._acct_password = False
             self.notice(f"Signed in as {display}", GREEN, 4)
             self._bring_to_front()
-        else:
-            msg = info.get("message") or "Sign-in failed. Try again."
-            if msg != "Sign-in cancelled.":
-                self.notice(msg, RED, 6)
-            self._acct_msg = (msg, RED if msg != "Sign-in cancelled." else MUTED)
-        self._paint_chip()
-        self.update_status()
-        if self.page in ("account", "play"):
-            self.show_page(self.page, animate=False)
-        if ok and then:
-            self.after(500, then)
+        # the Hero Key: the one just used, else the account's first one made for the launcher
+        if hero_key:
+            self._keep_hero_key(hero_key)
+        elif not (self._saved_hero_key() and self.settings.get("hero_account") == user):
+            self.session.pop("hero_key", None)
+            self.settings.pop("hero_key", None)
+            self._fetch_hero_key(realm_i, info["token"])
+        self.settings["hero_account"] = user
+        self.save_settings()
 
     def _bring_to_front(self):
         try:
@@ -5221,10 +5397,11 @@ class Launcher(tk.Tk):
         cw = 380
         self.card(x, y, cw, 200, "profile", "profile")
         self.cv.create_image(x + 26, y + 70, anchor="w", image=self.img("prof_av", art.avatar(76, (self.session.get("display") or user)[:1])), tags="page")
-        discord = self.session.get("via") == "discord"
+        discord = self._web_session()
         self.shadow_text(x + 118, y + 52, (self.session.get("display") or user).upper()[:22], 15, GOLD)
         ver = self.session.get("verified")
-        st, col = ((("Signed in through the realm's website" if discord else "Verified with the login server"), GREEN) if ver else
+        st, col = (((("Signed in with your Hero Key" if self.session.get("via") == "hero" else "Signed in with the realm's website")
+                     if discord else "Verified with the login server"), GREEN) if ver else
                    ("Saved sign-in (realm not checked yet)", AMBER) if ver is None else ("Login not verified", RED))
         self.cv.create_text(x + 118, y + 80, anchor="w", text=st, fill=col, font=font(9, "bold"), tags="page")
         self.cv.create_text(x + 118, y + 100, anchor="w", text=f"Realm: {realm.get('name')}", fill=MUTED, font=font(9), tags="page")
@@ -5235,15 +5412,16 @@ class Launcher(tk.Tk):
                             text="PLAY will log you straight in as this account.")
         self.pill_button(x, y + 216, 180, 36, "SIGN OUT", self.sign_out, style="danger", size=9, icon="logout")
         if discord:
-            self.pill_button(x + 192, y + 216, 188, 36, "SWITCH ACCOUNT", self.switch_account, style="discord", size=9,
-                             icon="discord")
+            self.pill_button(x + 192, y + 216, 188, 36, "SWITCH ACCOUNT", self.switch_account, style="ghost", size=9)
         if realm.get("portal"):
             self.link_text(x, y + 276, "Realm website ›", lambda: safe_open(realm["portal"]), 9)
 
         rx = x + cw + 30
         rw = w - cw - 30
         if discord:
-            self._game_login_card(rx, y, rw, user)
+            half = (rw - 20) // 2
+            self._game_login_card(rx, y, half, user)
+            self._hero_key_card(rx + half + 20, y, rw - half - 20)
             return
 
         # change password
@@ -5291,10 +5469,65 @@ class Launcher(tk.Tk):
         self.wbutton(row, "Hide" if shown else "Show", toggle).pack(side="left")
         self.wbutton(row, "Copy password", copy, primary=True).pack(side="left", padx=8)
 
+    def _web_session(self):
+        """Signed in through the realm's website (Google, guest, the Hero Key; "discord" before 0042)."""
+        return self.session.get("via") in ("discord", "web", "hero") or bool(self.session.get("token"))
+
+    def _hero_key_card(self, rx, y, rw):
+        """The account's Hero Key, kept by the launcher: copy it out, or paste the one you have."""
+        self.card(rx, y, rw, 290, "herokey", "herokey")
+        self.shadow_text(rx + 22, y + 28, "YOUR HERO KEY", 10, GOLD)
+        f = self.frame_on(rx + 22, y + 50, rw - 44, 230, bg=PANEL)
+        key = self._saved_hero_key()
+        if key:
+            tk.Label(f, text="Saved in this launcher (encrypted). It signs you in here with no browser and no "
+                             "password. Keep a copy: with it you can sign in on any PC.",
+                     bg=PANEL, fg=MUTED, font=font(9), wraplength=rw - 60, justify="left").pack(anchor="w", pady=(0, 10))
+            tk.Label(f, text=key[:15] + "…", bg=PANEL, fg=TEXT, font=font(11, "bold")).pack(anchor="w", pady=(0, 10))
+
+            def copy():
+                self.clipboard_clear()
+                self.clipboard_append(key)
+                self.notice("Hero Key copied. Keep it private.", GREEN)
+
+            row = tk.Frame(f, bg=PANEL)
+            row.pack(anchor="w")
+            self.wbutton(row, "Save a copy", self._save_hero_key_copy, primary=True, icon="key").pack(side="left")
+            self.wbutton(row, "Copy", copy).pack(side="left", padx=8)
+            return
+        if self.session.get("hero_elsewhere"):
+            tk.Label(f, text="Your account has a Hero Key already. Paste it here once and the launcher keeps it.",
+                     bg=PANEL, fg=MUTED, font=font(9), wraplength=rw - 60, justify="left").pack(anchor="w", pady=(0, 8))
+            e = self.entry(f, show="•", width=26)
+            e.pack(anchor="w", ipady=4, pady=(0, 8))
+
+            def keep():
+                if self._keep_hero_key(e.get()):
+                    self.session.pop("hero_elsewhere", None)
+                    self.notice("Hero Key saved in the launcher", GREEN)
+                    self.show_page("account", animate=False)
+                else:
+                    self.notice("That doesn't look like a Hero Key (it starts with ovk1)", RED)
+
+            row = tk.Frame(f, bg=PANEL)
+            row.pack(anchor="w")
+            self.wbutton(row, "Keep it", keep, primary=True, icon="key").pack(side="left")
+
+            def renew():
+                if messagebox.askyesno("A new Hero Key", "Make a new Hero Key? Your old one stops working at once, "
+                                       "everywhere.", parent=self):
+                    self._fetch_hero_key(self.session.get("realm", self.realm_index), self.session.get("token"), replace=True)
+
+            self.wbutton(row, "Lost it? New key", renew).pack(side="left", padx=8)
+            return
+        tk.Label(f, text="Getting your Hero Key from the realm…" if self.session.get("token") else
+                 "Sign in with Google once and the launcher keeps your Hero Key.",
+                 bg=PANEL, fg=MUTED, font=font(9), wraplength=rw - 60, justify="left").pack(anchor="w")
+
     def switch_account(self):
-        """Sign out here and in the browser, then pick a Discord account."""
+        """Sign out here and in the browser, then pick another Google account."""
         self._sign_out_quietly()
-        self.sign_in_discord(switch=True)
+        self.sign_in_google(switch=True)
 
     # ----- account actions (network on worker threads)
 
@@ -5466,7 +5699,8 @@ class Launcher(tk.Tk):
             pw = account.unprotect(self.settings.get("saved_password"))
             # Shown as signed in at once (offline play still works); the realm confirms in the background.
             self.session = dict(user=self.settings.get("account", ""), password=pw or "", realm=realm_i, verified=None,
-                                display=self.settings.get("account_display"), via="discord", token=token)
+                                display=self.settings.get("account_display"), via=self.settings.get("account_via") or "web",
+                                token=token)
 
             def work():
                 status, info = account.launcher_me(portal, token)
@@ -5491,7 +5725,7 @@ class Launcher(tk.Tk):
         self._paint_chip()
 
     def _launcher_me_done(self, status, info):
-        if self.session.get("via") != "discord":
+        if not self.session.get("token"):
             return
         if status == 200:
             self.session.update(user=str(info["user"]).upper(), password=str(info["pass"]), verified=True,
@@ -5504,6 +5738,8 @@ class Launcher(tk.Tk):
         elif status in (401, 403):
             self._sign_out_quietly()
             self._acct_msg = (info.get("message") or "Your sign-in ended. Sign in again.", AMBER)
+            if self._saved_hero_key():
+                self.sign_in_hero(self._saved_hero_key(), quiet=True)   # the kept Hero Key signs in again
         # 0 = the realm is unreachable: stay signed in on the saved login (verified stays None)
         self._paint_chip()
         self.update_status()
@@ -6153,9 +6389,9 @@ class Launcher(tk.Tk):
         realm = self.realms[self.realm_index]
         signed_in = self.session.get("password") and self.session.get("realm", self.realm_index) == self.realm_index
         if not signed_in and safe_url(realm.get("portal")):
-            # Not signed in: Discord first (instant when the browser already is), then PLAY carries on.
-            self.notice("Sign in to play — finishing in your browser", GOLD, 6)
-            self.sign_in_discord(then=self.play)
+            # Not signed in: the kept Hero Key (no browser), else Google; then PLAY carries on.
+            self.notice("Signing you in…" if self._saved_hero_key() else "Sign in to play — finishing in your browser", GOLD, 6)
+            self.sign_in_auto(then=self.play)
             return
         exe = self.client_exe(c)
         if (self.realm_state.get(self.realm_index) or {}).get("via") == "website":
@@ -6194,7 +6430,7 @@ class Launcher(tk.Tk):
         token = self._launcher_token()
         if not token:
             self.notice("Sign in to play this realm with the desktop game", GOLD, 6)
-            self.sign_in_discord(then=self.play)
+            self.sign_in_auto(then=self.play)
             return
         b_mod = p2p_module("bridge")
         if not b_mod or not hasattr(b_mod, "PortalBridge"):
@@ -6273,7 +6509,7 @@ class Launcher(tk.Tk):
         except OSError as e:
             messagebox.showerror("Can't start", str(e), parent=self)
             return
-        if self.session.get("via") == "discord" and self.session.get("password"):
+        if self._web_session() and self.session.get("password"):
             # The stock client can't be logged in for you: its password is on the clipboard.
             self.clipboard_clear()
             self.clipboard_append(self.session["password"])

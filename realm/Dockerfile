@@ -42,6 +42,9 @@
 #         gravity off, until its own tile's colliders arrive ("walked five steps, fell through the world")
 #   0041  play page: a software GPU adapter (SwiftShader, llvmpipe) warns before loading, with "Play anyway"
 #         and ?softgpu=1 to skip it
+#   0042  launcher sign-in (service): ?via=google (straight to Google) and ?via=key (the Hero Key page);
+#         POST /api/launcher/hero (the launcher signs in with the Hero Key it keeps, no browser) and
+#         POST /api/launcher/herokey (a launcher token gets the account's first key, or a new one)
 # The workflow (.github/workflows/realm-image.yml) compiles the browser client and the realm
 # service on the runner, where their build cache survives between runs, and stages them in out/:
 #   out/wenilla-realm   cargo build --release -p wenilla-realm
