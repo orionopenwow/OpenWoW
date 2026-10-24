@@ -1,6 +1,11 @@
 # Open Vanilla changelog
 (build_repack.py turns the newest sections into the launcher's patch notes: "## Section" headers, "- item" lines.)
 
+## New in 1.54.1
+- Hotfix: launcher sign-in certificates chain to ISRG Root X1 (RSA); the launcher trusts Mozilla's roots too.
+- Hotfix: a game button clicks when you lift after it shows pushed (slow phones).
+- Hotfix: phone taps click for real (game-tick taps); Herald travels on foot.
+
 ## New in 1.54.0
 - Launcher sign-in: Continue with Google and the Hero Key the launcher keeps, no Discord sign-in (realm patch 0042).
 

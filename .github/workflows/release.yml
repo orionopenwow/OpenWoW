@@ -65,7 +65,7 @@ jobs:
           python-version: "3.12"
       - name: Tools
         run: |
-          python -m pip install --quiet "pyinstaller>=6" pillow aiohttp pymysql
+          python -m pip install --quiet "pyinstaller>=6" pillow aiohttp pymysql certifi
           choco install innosetup -y --no-progress
       - name: Engine binary and its licences
         shell: bash
